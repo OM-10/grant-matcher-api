@@ -7,7 +7,7 @@ services:
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
-        value: 3.9.16
+        value: 3.11.13
       - key: PG_DBNAME
         sync: false
       - key: PG_USER
@@ -26,7 +26,3 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
-      - key: PG_EMAIL
-        sync: false
-      - key: PG_uPASS
-        sync: false 
