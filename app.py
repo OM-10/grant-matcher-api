@@ -9,6 +9,8 @@ from openai import OpenAI
 import jwt
 from jwt import InvalidTokenError
 import sys
+from datetime import datetime
+import re
 
 load_dotenv()
 
@@ -586,6 +588,60 @@ def get_user_profile():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/get-user-details", methods=["GET"])
+def get_user_details():
+    try:
+        # 1. Verify JWT
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid token"}), 401
+
+        token = auth_header.replace("Bearer ", "")
+        user_info = verify_jwt(token)
+        if not user_info:
+            return jsonify({"error": "Invalid or expired token"}), 403
+
+        user_id = user_info["sub"]
+
+        # 2. Connect to DB and fetch user details
+        conn = psycopg2.connect(**db_config)
+        cursor = conn.cursor()
+
+        # SQL query to get user details
+        query = """
+            SELECT fname, lname, date_of_birth, gender
+            FROM user_details
+            WHERE user_id = %s;
+        """
+        
+        cursor.execute(query, (user_id,))
+        result = cursor.fetchone()
+
+        cursor.close()
+        conn.close()
+
+        # Return user details or empty fields if not found
+        if result:
+            fname, lname, date_of_birth, gender = result
+            # Format the date to ensure it's in yyyy-MM-dd format
+            formatted_date = format_date_for_db(str(date_of_birth)) if date_of_birth else ""
+            return jsonify({
+                "fname": fname or "",
+                "lname": lname or "",
+                "date_of_birth": formatted_date,
+                "gender": gender or ""
+            })
+        else:
+            return jsonify({
+                "fname": "",
+                "lname": "",
+                "date_of_birth": "",
+                "gender": ""
+            })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 def get_embedding(text, dim):
     model = "text-embedding-3-large" if dim == 3072 else "text-embedding-3-small"
@@ -797,6 +853,104 @@ def save_linkedin_profile():
         return jsonify({"error": str(e)}), 500
 
 
+def format_date_for_db(date_str):
+    """
+    Convert various date formats to yyyy-MM-dd format for database storage.
+    Handles formats like:
+    - yyyy-MM-dd
+    - MM/dd/yyyy
+    - MM-dd-yyyy
+    - "Wed, 09 Jul 2025 00:00:00 GMT" (JavaScript Date.toUTCString())
+    """
+    if not date_str:
+        return ""
+    
+    try:
+        # Try yyyy-MM-dd format
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        return date_obj.strftime('%Y-%m-%d')
+    except ValueError:
+        try:
+            # Try MM/dd/yyyy format
+            date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+            return date_obj.strftime('%Y-%m-%d')
+        except ValueError:
+            try:
+                # Try MM-dd-yyyy format
+                date_obj = datetime.strptime(date_str, '%m-%d-%Y')
+                return date_obj.strftime('%Y-%m-%d')
+            except ValueError:
+                try:
+                    # Try JavaScript Date.toUTCString() format: "Wed, 09 Jul 2025 00:00:00 GMT"
+                    # Remove timezone and parse the date part
+                    date_part = date_str.split(', ')[1].split(' ')[0]  # Get "09 Jul 2025"
+                    date_obj = datetime.strptime(date_part, '%d %b %Y')
+                    return date_obj.strftime('%Y-%m-%d')
+                except (ValueError, IndexError):
+                    # If all parsing fails, return empty string
+                    return ""
+
+@app.route("/save-user-details", methods=["POST"])
+def save_user_details():
+    try:
+        # 1. Verify token
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "Missing or invalid token"}), 401
+
+        token = auth_header.split(" ")[1]
+        user_info = verify_jwt(token)
+        if not user_info:
+            return jsonify({"error": "Invalid or expired token"}), 403
+
+        user_id = user_info["sub"]
+
+        # 2. Parse input
+        body = request.get_json()
+        
+        # Validate required fields
+        if not body.get("fname") or not body.get("lname"):
+            return jsonify({"error": "fname and lname are required"}), 400
+
+        # Format date_of_birth for database storage
+        formatted_date = format_date_for_db(body.get("date_of_birth", ""))
+
+        # 3. Connect to DB and upsert user details
+        conn = psycopg2.connect(**db_config)
+        cursor = conn.cursor()
+
+        # Upsert query to handle both insert and update
+        query = """
+            INSERT INTO user_details (user_id, fname, lname, date_of_birth, gender, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (user_id)
+            DO UPDATE SET
+                fname = EXCLUDED.fname,
+                lname = EXCLUDED.lname,
+                date_of_birth = EXCLUDED.date_of_birth,
+                gender = EXCLUDED.gender,
+                updated_at = NOW()
+        """
+
+        cursor.execute(query, (
+            user_id, 
+            body.get("fname", ""), 
+            body.get("lname", ""), 
+            formatted_date, 
+            body.get("gender", "")
+        ))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return jsonify({
+            "status": "success", 
+            "message": "User details saved successfully"
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 
